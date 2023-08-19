@@ -1,6 +1,6 @@
 { nixpkgs ? import <nixpkgs> {} }:
 {
-  aloha_api = nixpkgs.callPackage ./aloha.nix { 
+  model_elixir_api = nixpkgs.callPackage ./model_elixir.nix { 
     pkgs = nixpkgs;
   };
 }

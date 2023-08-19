@@ -4,7 +4,7 @@ let
   git_rev = "GIT_REV";
 
 in stdenv.mkDerivation {
-  name = "aloha";
+  name = "model_elixir";
   builder = ./nix/package_release.sh;
 
   nativeBuildInputs = [
