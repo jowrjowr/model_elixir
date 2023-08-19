@@ -1,0 +1,9 @@
+plugin: aws_ec2
+regions:
+  - us-west-2
+filters:
+  tag:environment: prod
+  tag:project: model_elixir
+  tag:Name: main_*
+hostnames:
+  - dns-name

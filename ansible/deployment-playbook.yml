@@ -1,0 +1,70 @@
+---
+- name: nix-collect-garbage
+  hosts: aws_ec2
+  strategy: free
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: force garbage collect
+      command: nix-collect-garbage
+      register: update
+      failed_when: update.rc > 0
+
+- name: nix-channel update
+  hosts: aws_ec2
+  strategy: free
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: Update nix channel
+      command: nix-channel --update model_elixir nixos
+      register: update
+      failed_when: update.rc > 0
+
+- name: Deploy model_elixir
+  hosts: aws_ec2
+  strategy: free
+  gather_facts: no
+  serial:
+    - 1
+    - "50%"
+    - "100%"
+  become: yes
+  tasks:
+    - name: ensure model_elixir api service is stopped
+      service:
+        name: model_elixir
+        state: stopped
+    - name: Rebuild
+      retries: 1
+      delay: 2
+      command: nixos-rebuild switch
+      register: nixos_rebuild
+      until: nixos_rebuild is not failed
+    - name: Refesh credentials from credstash
+      service:
+        name: model_elixir-credentials
+        state: restarted
+    - name: ensure model_elixir service is started
+      service:
+        name: model_elixir
+        state: started
+    - name: Health Check
+      uri:
+        url: "http://localhost:4000/heartbeat/{{ git_sha }}"
+        method: GET
+      register: _result
+      until: _result.status == 200
+      retries: 30
+      delay: 1
+
+- name: nix GC
+  hosts: aws_ec2
+  strategy: free
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: collect garbage
+      command: nix-collect-garbage --delete-older-than 2d
+      register: gc
+      failed_when: gc.rc > 0

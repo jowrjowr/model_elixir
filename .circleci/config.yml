@@ -1,0 +1,220 @@
+version: 2.1
+orbs:
+  slack: circleci/slack@4.12.1
+
+parameters:
+  cache-version:
+    type: string
+    description: "version of circleci cache"
+    default: "v2"
+  nixos-container-version:
+    type: string
+    description: "the dockerhub nix container version"
+    default: "2.11.1"
+  postgres-container-version:
+    type: string
+    description: "the dockerhub postgres container version"
+    default: "14.4"
+  nix-version:
+    type: string
+    description: "nixos itself"
+    default: "23.05"
+
+commands:
+  setup-environment:
+    description: "setup a given mix environment"
+    parameters:
+      after-compile:
+        description: "Steps that will be executed after project compilation but before build cache is saved"
+        type: steps
+        default: []
+      mix_environment:
+        type: string
+        description: "mix environment"
+        default: "test"
+    steps:
+      - run:
+          name: setup home
+          command: echo 'export HOME=/root' >> $BASH_ENV; cd /root
+      - checkout
+      - run:
+          name: set MIX_ENV
+          command: echo 'export MIX_ENV=<< parameters.mix_environment >>' >> $BASH_ENV
+      - run:
+          name: set LANG
+          command: echo 'export LANG="en_US.UTF-8"' >> $BASH_ENV
+      - run:
+          name: set locale
+          command: echo 'export LOCALE_ARCHIVE="$(nix-env --installed --no-name --out-path --query glibc-locales)/lib/locale/locale-archive"' >> $BASH_ENV
+      - run:
+          name: remove existing nixpkgs
+          command: nix-channel --remove nixpkgs
+      - run:
+          name: adds nixos channel
+          command: nix-channel --add https://nixos.org/channels/nixos-<< pipeline.parameters.nix-version>> nixpkgs
+      - run:
+          name: nixos channel updates
+          command: nix-channel --update
+      - run:
+          name: install packages
+          command: nix-env -if nix/build_container.nix
+      - run:
+          name: store elixir version using what nix says
+          command: echo $(nix-store -qR $(which elixir)) > .elixir_version
+      - restore_cache:
+          name: "restore dependency cache"
+          keys:
+            - << pipeline.parameters.cache-version >>-dep-cache-env-<< parameters.mix_environment >>-elixir-{{ checksum ".elixir_version" }}-dep-cache-{{ checksum "mix.lock" }}
+            - << pipeline.parameters.cache-version >>-dep-cache-env-<< parameters.mix_environment >>-elixir-{{ checksum ".elixir_version" }}
+      - restore_cache:
+          name: "restore build cache"
+          keys:
+            - << pipeline.parameters.cache-version >>-build-cache-env-<< parameters.mix_environment >>-elixir-{{ checksum ".elixir_version" }}-dep-cache-{{ checksum "mix.lock" }}
+            - << pipeline.parameters.cache-version >>-build-cache-env-<< parameters.mix_environment >>-elixir-{{ checksum ".elixir_version" }}
+      - run:
+          name: get hex
+          command: mix local.hex --force
+      - run:
+          name: get rebar
+          command: mix local.rebar --force
+      - run:
+          name: get dependencies
+          command: mix deps.get
+      - run:
+          name: compile dependencies
+          command: mix deps.compile
+      - run:
+          name: update tzdata
+          command: mix TzdataUpdate
+      - run:
+          name: check formatting
+          command: mix format --check-formatted
+      - run:
+          name: build static assets
+          command: mix assets.deploy
+      - run:
+          name: put git hash into priv/hash
+          command: echo $CIRCLE_SHA1 > priv/hash
+      - save_cache:
+          name: "save dependencies cache"
+          key: << pipeline.parameters.cache-version >>-dep-cache-env-<< parameters.mix_environment >>-elixir-{{ checksum ".elixir_version" }}-dep-cache-{{ checksum "mix.lock" }}
+          paths:
+            - deps
+      - run:
+          name: compile code
+          command: mix compile --warnings-as-errors
+      - steps: << parameters.after-compile >>
+      - save_cache:
+          name: "save build cache"
+          key: << pipeline.parameters.cache-version >>-build-cache-env-<< parameters.mix_environment >>-elixir-{{ checksum ".elixir_version" }}-dep-cache-{{ checksum "mix.lock" }}
+          paths:
+            - _build
+            - priv/plts
+jobs:
+  dialyzer:
+    resource_class: large
+    docker:
+      - image: nixos/nix:<< pipeline.parameters.nixos-container-version>>
+    steps:
+      - setup-environment:
+          mix_environment: "dev"
+          after-compile:
+            - run:
+                name: build dialyzer PLTs in dev
+                command: mix dialyzer --plt
+            - run:
+                name: run dialyzer
+                command: mix dialyzer --format dialyxir
+  test:
+    resource_class: large
+    docker:
+      - image: nixos/nix:<< pipeline.parameters.nixos-container-version>>
+      - image: postgres:<< pipeline.parameters.postgres-container-version>>
+        environment:
+          POSTGRES_PASSWORD: postgres
+          PGDATA: /var/lib/postgresql/data
+          POSTGRES_USER: postgres
+          POSTGRES_DB: aloha
+
+    steps:
+      - setup-environment:
+          mix_environment: "test"
+          after-compile:
+            - run:
+                name: initialize databases
+                command: mix do db.setup
+            - run:
+                name: credo style/consistency static analysis
+                command: mix credo --all
+            - run:
+                name: sobelow security scanner
+                command: mix sobelow --config
+            - run:
+                name: run tests
+                command: mix test
+      - slack/notify:
+          event: fail
+          template: basic_fail_1
+
+  release:
+    parameters:
+      aws_environment:
+        description: "AWS environment"
+        type: string
+        default: "staging"
+    resource_class: large
+    docker:
+      - image: nixos/nix:<< pipeline.parameters.nixos-container-version>>
+    steps:
+      - setup-environment:
+          after-compile: []
+          mix_environment: "prod"
+      - run:
+          name: nix channels
+          command: nix-channel --list
+      - run:
+          name: create release
+          command: mix release
+      - run:
+          name: deploy release to S3
+          command: ./bin/release_to_s3.sh << parameters.aws_environment >>
+      - run:
+          name: deploy CDN content
+          command: ./bin/release_content_to_cdn.sh << parameters.aws_environment >>
+      - add_ssh_keys:
+          fingerprints:
+            - "01:a2:30:cb:82:f8:41:7d:98:26:56:12:22:6d:ff:1a"
+      - run:
+          name: install ansible dependencies
+          command: nix-env -if ansible/deploy.nix
+      - run:
+          name: ansible the servers
+          command: cd ansible && ./deploy.sh << parameters.aws_environment >>
+      - slack/notify:
+          event: fail
+          template: basic_fail_1
+      - slack/notify:
+          event: pass
+          template: success_tagged_deploy_1
+
+workflows:
+  test-and-deploy-if-tagged:
+    jobs:
+      - test
+      - dialyzer
+      - release:
+          name: "release to AWS staging"
+          aws_environment: "staging"
+          filters:
+            tags:
+              only: /staging-.*/
+            branches:
+              ignore: /.*/
+      - release:
+          name: "release to AWS prod"
+          aws_environment: "prod"
+          filters:
+            tags:
+              only: /prod-.*/
+            branches:
+              ignore: /.*/

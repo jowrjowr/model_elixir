@@ -1,0 +1,12 @@
+[
+  verbose: false,
+  private: true,
+  skip: true,
+  router: "",
+  exit: "low",
+  format: "compact",
+  out: "",
+  threshold: "low",
+  ignore: ["Config.HTTPS", "Config.Headers", "Traversal.FileModule"],
+  ignore_files: [""],
+]
